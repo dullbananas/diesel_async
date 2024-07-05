@@ -367,11 +367,8 @@ impl AsyncPgConnection {
         // We apply this workaround to prevent requiring all the diesel
         // serialization code to beeing async
         let mut bind_collector_0 = RawBytesBindCollector::<diesel::pg::Pg>::new();
-        let collect_bind_result_0 = query.collect_binds(
-            &mut bind_collector_0,
-            &mut SameOidEveryTime { first_byte: 0 },
-            &Pg,
-        );
+        let collect_bind_result_0 =
+            query.collect_binds(&mut bind_collector_0, &mut SameOidEveryTime {}, &Pg);
 
         let mut metadata_lookup = PgAsyncMetadataLookup::new(&bind_collector_0);
         let collect_bind_result =
@@ -548,14 +545,11 @@ impl PgMetadataLookup for PgAsyncMetadataLookup {
 /// Allows unambiguously determining:
 /// * where OIDs are written in `bind_collector.binds` after being returned by `lookup_type`
 /// * determining the maximum hardcoded OID in `bind_collector.metadata`
-struct SameOidEveryTime {
-    first_byte: u8,
-}
+struct SameOidEveryTime {}
 
 impl PgMetadataLookup for SameOidEveryTime {
     fn lookup_type(&mut self, _type_name: &str, _schema: Option<&str>) -> PgTypeMetadata {
-        let oid = u32::from_be_bytes([self.first_byte, 0, 0, 0]);
-        PgTypeMetadata::new(oid, oid)
+        PgTypeMetadata::new(0, 0)
     }
 }
 
