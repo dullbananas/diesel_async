@@ -373,24 +373,29 @@ impl AsyncPgConnection {
             &Pg,
         );
 
-        let mut bind_collector_1 = RawBytesBindCollector::<diesel::pg::Pg>::new();
-        let collect_bind_result_1 = query.collect_binds(
-            &mut bind_collector_1,
-            &mut SameOidEveryTime { first_byte: 1 },
-            &Pg,
-        );
-
         let mut metadata_lookup = PgAsyncMetadataLookup::new(&bind_collector_0);
         let collect_bind_result =
             query.collect_binds(&mut bind_collector, &mut metadata_lookup, &Pg);
 
-        let fake_oid_locations = std::iter::zip(bind_collector_0.binds, bind_collector_1.binds)
+        let mut previous_location = None::<(usize, usize)>;
+        let fake_oid_locations = std::iter::zip(bind_collector_0.binds, &bind_collector.binds)
             .enumerate()
             .flat_map(|(bind_index, (bytes_0, bytes_1))| {
-                std::iter::zip(bytes_0.unwrap_or_default(), bytes_1.unwrap_or_default())
-                    .enumerate()
-                    .filter(|&(_, bytes)| bytes == (0, 1))
-                    .map(move |(byte_index, _)| (bind_index, byte_index))
+                std::iter::zip(
+                    bytes_0.unwrap_or_default(),
+                    bytes_1.as_deref().unwrap_or(&[]),
+                )
+                .enumerate()
+                .filter(|&(_, (byte_a, &byte_b))| byte_a != byte_b)
+                .filter_map(move |(byte_index, _)| {
+                    if previous_location.is_some_and(|(a, b)| a == bind_index && b + 4 > byte_index)
+                    {
+                        None
+                    } else {
+                        previous_location = Some((bind_index, byte_index));
+                        previous_location
+                    }
+                })
             })
             // Avoid storing the bind collectors in the returned Future
             .collect::<Vec<_>>();
@@ -404,7 +409,6 @@ impl AsyncPgConnection {
             let sql = sql?;
             let is_safe_to_cache_prepared = is_safe_to_cache_prepared?;
             collect_bind_result_0?;
-            collect_bind_result_1?;
             collect_bind_result?;
             // Check whether we need to resolve some types at all
             //
@@ -518,9 +522,11 @@ impl PgAsyncMetadataLookup {
             .flat_map(|m| [m.oid().unwrap_or(0), m.array_oid().unwrap_or(0)])
             .max()
             .unwrap_or(0);
+        // Any number greater than or equal to `highest_bit_set` guarantees that the first byte is different when comparing the entire number to 0
+        let highest_bit_set = 1 << 31;
         Self {
             unresolved_types: Vec::new(),
-            min_fake_oid: max_hardcoded_oid + 1,
+            min_fake_oid: std::cmp::max(max_hardcoded_oid + 1, highest_bit_set),
         }
     }
 
