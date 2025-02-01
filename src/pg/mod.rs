@@ -105,7 +105,9 @@ pub struct AsyncPgConnection {
     conn: Arc<tokio_postgres::Client>,
     stmt_cache: Arc<Mutex<StmtCache<diesel::pg::Pg, Statement>>>,
     transaction_state: Arc<Mutex<AnsiTransactionManager>>,
-    metadata_cache: Arc<Mutex<PgMetadataCache>>,
+    metadata_cache: Arc<std::sync::Mutex<PgMetadataCache>>,
+    /// When pipelined queries use a custom type that isn't in `metadata_cache` yet, this ensures that it's only looked up once
+    metadata_lookup_mutex: Arc<Mutex<()>>,
     connection_future: Option<broadcast::Receiver<Arc<tokio_postgres::Error>>>,
     shutdown_channel: Option<oneshot::Sender<()>>,
 }
@@ -357,19 +359,20 @@ impl AsyncPgConnection {
             .to_sql(&mut query_builder, &Pg)
             .map(|_| query_builder.finish());
 
-        let mut bind_collector = RawBytesBindCollector::<diesel::pg::Pg>::new();
         let query_id = T::query_id();
-
+        
         // we don't resolve custom types here yet, we do that later
         // in the async block below as we might need to perform lookup
         // queries for that.
         //
         // We apply this workaround to prevent requiring all the diesel
         // serialization code to beeing async
-        let mut bind_collector_0 = RawBytesBindCollector::<diesel::pg::Pg>::new();
-        let collect_bind_result_0 =
-            query.collect_binds(&mut bind_collector_0, &mut SameOidEveryTime {}, &Pg);
-
+        let mut metadata_lookup = SameOidEveryTime::new(&self.metadata_cache);
+        let mut bind_collector = RawBytesBindCollector::<diesel::pg::Pg>::new();
+        let collect_bind_result =
+        query.collect_binds(&mut bind_collector, &mut metadata_lookup, &Pg);
+        let //////////if metadata_lookup.lookup_needed {}
+        let mut bind_collector = RawBytesBindCollector::<diesel::pg::Pg>::new();
         let mut metadata_lookup = PgAsyncMetadataLookup::new(&bind_collector_0);
         let collect_bind_result =
             query.collect_binds(&mut bind_collector, &mut metadata_lookup, &Pg);
@@ -545,11 +548,34 @@ impl PgMetadataLookup for PgAsyncMetadataLookup {
 /// Allows unambiguously determining:
 /// * where OIDs are written in `bind_collector.binds` after being returned by `lookup_type`
 /// * determining the maximum hardcoded OID in `bind_collector.metadata`
-struct SameOidEveryTime {}
+struct SameOidEveryTime<'a> {
+    metadata_cache: &'a std::sync::Mutex<PgMetadataCache>,
+    lookup_needed: bool,
+}
+
+impl<'a> SameOidEveryTime<'a> {
+    fn new(metadata_cache: &'a std::sync::Mutex<PgMetadataCache>) -> Self {
+        Self {
+            metadata_cache,
+            lookup_needed: false,
+        }
+    }
+}
 
 impl PgMetadataLookup for SameOidEveryTime {
-    fn lookup_type(&mut self, _type_name: &str, _schema: Option<&str>) -> PgTypeMetadata {
-        PgTypeMetadata::new(0, 0)
+    fn lookup_type(&mut self, type_name: &str, schema: Option<&str>) -> PgTypeMetadata {
+        self
+            .metadata_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .lookup_type(&PgMetadataCacheKey::new(
+                schema.as_ref().map(Into::into),
+                lookup_type_name.into(),
+            ));
+            .unwrap_or_else(|| {
+                self.lookup_needed = true;
+                PgTypeMetadata::new(0, 0)
+            })
     }
 }
 
